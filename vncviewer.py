@@ -24,6 +24,8 @@ import sys, struct
 import rfb
 import inputbox
 
+from eric import getEricAuth
+
 POINTER = tuple([(8,8), (4,4)] + list(pygame.cursors.compile((
 #01234567
 "        ", #0
@@ -142,6 +144,7 @@ class PyGameApp:
         self.sprites.add(self.statustext)
         self.buttons = 0
         self.protocol = None
+        self.key_uni = {}
         
     def setRFBSize(self, width, height, depth=32):
         """change screen size"""
@@ -182,27 +185,35 @@ class PyGameApp:
                 #~ self.alive = 0
                 #~ reactor.stop()
             if self.protocol is not None:
-                if e.type == KEYDOWN:
+                if e.type == KEYDOWN or e.type == KEYUP:
+                    down = (e.type == KEYDOWN)
                     if e.key in MODIFIERS:
-                        self.protocol.keyEvent(MODIFIERS[e.key], down=1)
+                        self.protocol.keyEvent(MODIFIERS[e.key], down)
                     elif e.key in KEYMAPPINGS:
-                        self.protocol.keyEvent(KEYMAPPINGS[e.key])
-                    elif e.unicode:
-                        self.protocol.keyEvent(ord(e.unicode))
+                        self.protocol.keyEvent(KEYMAPPINGS[e.key], down)
+                    #elif down and e.unicode:
+                    #    self.key_uni[e.key] = e.unicode
+                    #    self.protocol.keyEvent(ord(e.unicode), down)
+                    #elif not down and e.key in self.key_uni:
+                    #    self.protocol.keyEvent(ord(self.key_uni[e.key]), down)
+                    elif e.key < 128:
+                        self.protocol.keyEvent(e.key, down)
                     else:
                         print "warning: unknown key %r" % (e)
-                elif e.type == KEYUP:
-                    if e.key in MODIFIERS:
-                        self.protocol.keyEvent(MODIFIERS[e.key], down=0)
+                #elif e.type == KEYUP:
+                #    if e.key in MODIFIERS:
+                #        self.protocol.keyEvent(MODIFIERS[e.key], down=0)
                     #~ else:
                         #~ print "unknown key %r" % (e)
                 elif e.type == MOUSEMOTION:
+                    self.protocol.pointerEvent(e.pos[0], e.pos[1], self.buttons)
                     self.buttons  = e.buttons[0] and 1
                     self.buttons |= e.buttons[1] and 2
                     self.buttons |= e.buttons[2] and 4
                     self.protocol.pointerEvent(e.pos[0], e.pos[1], self.buttons)
                     #~ print e.pos
                 elif e.type == MOUSEBUTTONUP:
+                    self.protocol.pointerEvent(e.pos[0], e.pos[1], self.buttons)
                     if e.button == 1: self.buttons &= ~1
                     if e.button == 2: self.buttons &= ~2
                     if e.button == 3: self.buttons &= ~4
@@ -210,6 +221,7 @@ class PyGameApp:
                     if e.button == 5: self.buttons &= ~16
                     self.protocol.pointerEvent(e.pos[0], e.pos[1], self.buttons)
                 elif e.type == MOUSEBUTTONDOWN:
+                    self.protocol.pointerEvent(e.pos[0], e.pos[1], self.buttons)
                     if e.button == 1: self.buttons |= 1
                     if e.button == 2: self.buttons |= 2
                     if e.button == 3: self.buttons |= 4
@@ -433,26 +445,26 @@ def main():
 
     host = o.opts['host']
     display = int(o.opts['display'])
-    if host is None:
-        screen = pygame.display.set_mode((220,40))
-        screen.fill((0,100,255)) #blue bg
-        host = inputbox.ask(screen, "Host")
-        if host == '':
-            raise SystemExit
-        if ':' in host:
-            host, display = host.split(':')
-            if host == '':  host = 'localhost'
-            display = int(display)
+    #if host is None:
+    #    screen = pygame.display.set_mode((220,40))
+    #    screen.fill((0,100,255)) #blue bg
+    #    host = inputbox.ask(screen, "Host")
+    #    if host == '':
+    #        raise SystemExit
+    #    if ':' in host:
+    #        host, display = host.split(':')
+    #        if host == '':  host = 'localhost'
+    #        display = int(display)
 
     # connect to this host and port, and reconnect if we get disconnected
     reactor.connectTCP(
-        host,                                   #remote hostname
-        display + 5900,                         #TCP port number
+        'scumbag-control',                      #remote hostname
+        443,                         		#TCP port number
         VNCFactory(
                 remoteframebuffer,              #the application/display
                 depth,                          #color depth
                 o.opts['fast'],                 #if a fast connection is used
-                o.opts['password'],             #password or none
+                o.opts['password'],	            #password or none
                 int(o.opts['shared']),          #shared session flag
         )
     )

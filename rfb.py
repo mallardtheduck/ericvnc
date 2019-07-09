@@ -20,6 +20,11 @@ from twisted.internet.protocol import Factory, Protocol
 from twisted.internet import protocol
 from twisted.application import internet, service
 
+from eric import getEricAuth
+from scancodes import rfbToScancodes
+
+from Queue import Queue
+
 #~ from twisted.internet import reactor
 
 
@@ -108,46 +113,39 @@ class RFBClient(Protocol):
     def __init__(self):
         self._packet = []
         self._packet_len = 0
-        self._handler = self._handleInitial
+        self._handler = self._handleExpected
         self._already_expecting = 0
+        self._sendQueue = Queue()
+        self._downKeys = []
 
     #------------------------------------------------------
     # states used on connection startup
     #------------------------------------------------------
+    def connectionMade(self):
+        self.transport.write('e-RIC AUTH=' + getEricAuth())
+        self.expect(self._handleInitial, 39)
 
-    def _handleInitial(self):
+    def _handleInitial(self, block):
         buffer = ''.join(self._packet)
+        log.msg(buffer)
         if '\n' in buffer:
-            if buffer[:3] == 'RFB':
+            if buffer[:9] == 'e-RIC RFB':
                 #~ print "rfb"
-                maj, min = [int(x) for x in buffer[3:-1].split('.')]
+                maj, min = [int(x) for x in buffer[9:15].split('.')]
                 #~ print maj, min
-                if (maj, min) not in [(3,3), (3,7), (3,8)]:
-                    log.msg("wrong protocol version\n")
+                if (maj, min) not in [(1,11)]:
+                    log.msg("wrong protocol version: %d.%d\n" % (maj, min))
                     self.transport.loseConnection()
-            buffer = buffer[12:]
-            self.transport.write('RFB 003.003\n')
+            buffer = buffer[39:]
+            self.transport.write('e-RIC RFB 01.11\n\x01\x00')
             log.msg("connected\n")
             self._packet[:] = [buffer]
             self._packet_len = len(buffer)
             self._handler = self._handleExpected
-            self.expect(self._handleAuth, 4)
+            self.expect(self._handleConnection, 1)
         else:
             self._packet[:] = [buffer]
             self._packet_len = len(buffer)
-    
-    def _handleAuth(self, block):
-        (auth,) = unpack("!I", block)
-        #~ print "auth:", auth
-        if auth == 0:
-            self.expect(self._handleConnFailed, 4)
-        elif auth == 1:
-            self._doClientInitialization()
-            return
-        elif auth == 2:
-            self.expect(self._handleVNCAuth, 16)
-        else:
-            log.msg("unknown auth response (%d)\n" % auth)
 
     def _handleConnFailed(self):
         (waitfor,) = unpack("!I", block)
@@ -156,51 +154,27 @@ class RFBClient(Protocol):
     def _handleConnMessage(self, block):
         log.msg("Connection refused: %r\n" % block)
 
-    def _handleVNCAuth(self, block):
-        self._challenge = block
-        self.vncRequestPassword()
-        self.expect(self._handleVNCAuthResult, 4)
-
-    def sendPassword(self, password):
-        """send password"""
-        pw = (password + '\0' * 8)[:8]        #make sure its 8 chars long, zero padded
-        des = RFBDes(pw)
-        response = des.encrypt(self._challenge)
-        self.transport.write(response)
-    
-    def _handleVNCAuthResult(self, block):
-        (result,) = unpack("!I", block)
-        #~ print "auth:", auth
-        if result == 0:     #OK
-            self._doClientInitialization()
-            return
-        elif result == 1:   #failed
-            self.vncAuthFailed("autenthication failed")
-            self.transport.loseConnection()
-        elif result == 2:   #too many
-            slef.vncAuthFailed("too many tries to log in")
-            self.transport.loseConnection()
-        else:
-            log.msg("unknown auth response (%d)\n" % auth)
-        
     def _doClientInitialization(self):
         self.transport.write(pack("!B", self.factory.shared))
-        self.expect(self._handleServerInit, 24)
+        self.expect(self._handleServerInit, 20)
     
     def _handleServerInit(self, block):
-        (self.width, self.height, pixformat, namelen) = unpack("!HH16sI", block)
+        (self.width, self.height, pixformat) = unpack("!HH16s", block)
         (self.bpp, self.depth, self.bigendian, self.truecolor, 
          self.redmax, self.greenmax, self.bluemax,
          self.redshift, self.greenshift, self.blueshift) = \
            unpack("!BBBBHHHBBBxxx", pixformat)
         self.bypp = self.bpp / 8        #calc bytes per pixel
-        self.expect(self._handleServerName, namelen)
+        self.expect(self._handleConnection, 1)
         
     def _handleServerName(self, block):
         self.name = block
         #callback:
         self.vncConnectionMade()
         self.expect(self._handleConnection, 1)
+
+    def _throwAway(self, block):
+        pass
 
     #------------------------------------------------------
     # Server to client messages
@@ -214,9 +188,36 @@ class RFBClient(Protocol):
             self.expect(self._handleConnection, 1)
         elif msgid == 3:
             self.expect(self._handleServerCutText, 7)
+        elif msgid == 128:
+            self.expect(self._handleResize, 21)
+        elif msgid == 132:
+            self.expect(self._handleKvPair, 5)
         else:
-            log.msg("unknown message received (id %d)\n" % msgid)
+            log.msg("unknown message received (id %x)\n" % msgid)
             self.expect(self._handleConnection, 1)
+
+    def _handleResize(self, block):
+        (self.width, self.height, pixformat) = unpack("!xHH16s", block)
+        (self.bpp, self.depth, self.bigendian, self.truecolor, 
+         self.redmax, self.greenmax, self.bluemax,
+         self.redshift, self.greenshift, self.blueshift) = \
+           unpack("!BBBBHHHBBBxxx", pixformat)
+        self.bypp = self.bpp / 8        #calc bytes per pixel
+        self.vncConnectionMade()
+        self.expect(self._handleConnection, 1)
+
+    def _handleKvPair(self, block):
+        (self.keySize, self.valueSize) = unpack("!xHH", block)
+        self.expect(self._handleKey, self.keySize)
+
+    def _handleKey(self, block):
+        self.key = block
+        self.expect(self._handleValue, self.valueSize)
+
+    def _handleValue(self, block):
+        self.value = block
+        print "KV update: %s=%s\n" % (self.key, self.value)
+        self.expect(self._handleConnection, 1)
         
     def _handleFramebufferUpdate(self, block):
         (self.rectangles,) = unpack("!xH", block)
@@ -228,6 +229,7 @@ class RFBClient(Protocol):
         if self.rectangles:
             self.expect(self._handleRectangle, 12)
         else:
+            self._doQueuedSends()
             self.commitUpdate(self.rectanglePos)
             self.expect(self._handleConnection, 1)
     
@@ -249,7 +251,7 @@ class RFBClient(Protocol):
             #~ elif encoding == ZRLE_ENCODING:
                 #~ self.expect(self._handleDecodeZRLE, )
             else:
-                log.msg("unknown encoding received (encoding %d)\n" % encoding)
+                #log.msg("unknown encoding received (encoding %x)\n" % encoding)
                 self._doConnection()
         else:
             self._doConnection()
@@ -472,6 +474,13 @@ class RFBClient(Protocol):
     #------------------------------------------------------
     # client -> server messages
     #------------------------------------------------------
+
+    def _doQueuedSends(self):
+        while not self._sendQueue.empty() and self._packet_len == 0: self.transport.write(self._sendQueue.get_nowait())
+
+    def _queueBlock(self, block):
+        self._sendQueue.put(block)
+        self._doQueuedSends()
     
     def setPixelFormat(self, bpp=32, depth=24, bigendian=0, truecolor=1, redmax=255, greenmax=255, bluemax=255, redshift=0, greenshift=8, blueshift=16):
         pixformat = pack("!BBBBHHHBBBxxx", bpp, depth, bigendian, truecolor, redmax, greenmax, bluemax, redshift, greenshift, blueshift)
@@ -496,20 +505,33 @@ class RFBClient(Protocol):
     def keyEvent(self, key, down=1):
         """For most ordinary keys, the "keysym" is the same as the corresponding ASCII value.
         Other common keys are shown in the KEY_ constants."""
-        self.transport.write(pack("!BBxxI", 4, down, key))
+        if down:
+            if key not in self._downKeys: self._downKeys.append(key)
+        else:
+            if key not in self._downKeys:
+                self.keyEvent(key)
+            self._downKeys.remove(key)
+        #self.transport.write(pack("!BBxxI", 4, down, key))
+        codes = rfbToScancodes(key, (down != 1))
+        if codes is not None:
+            for c in codes: 
+                self._queueBlock(pack("!BB", 4, c))
+                #self.transport.write(pack("!BB", 4, c))
 
     def pointerEvent(self, x, y, buttonmask=0):
         """Indicates either pointer movement or a pointer button press or release. The pointer is
            now at (x-position, y-position), and the current state of buttons 1 to 8 are represented
            by bits 0 to 7 of button-mask respectively, 0 meaning up, 1 meaning down (pressed).
         """
-        self.transport.write(pack("!BBHH", 5, buttonmask, x, y))
+        self._queueBlock(pack("!BBHHH", 5, buttonmask, x, y, 0))
+        #self.transport.write(pack("!BBHHH", 5, buttonmask, x, y, 0))
 
     def clientCutText(self, message):
         """The client has new ASCII text in its cut buffer.
            (aka clipboard)
         """
-        self.transport.write(pack("!BxxxI", 6, len(message)) + message)
+        self._queueBlock(pack("!BxxxI", 6, len(message)) + message)
+        #self.transport.write(pack("!BxxxI", 6, len(message)) + message)
     
     #------------------------------------------------------
     # callbacks

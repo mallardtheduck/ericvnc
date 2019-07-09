@@ -1,0 +1,27 @@
+E-RIC Protocol messages
+
+Server to client messages:
+0 - 3 As per VNC/RFB spec (SetColorMapEntries is not implemented by Java client)
+7 - Related to the "chat" function (U8 padding, U16 string length, n bytes string data)
+8 - Unknown (4 x U8 values, 8 x U16 values)
+9 - Sets keyboard layout (U8 padding, U16 string length, n bytes string data)
+16 - Unknown (U8 flags?, U16 string length, n bytes string data)
+17 - Unknown/NOP (Java client simply discards 2 x U8 from stream)
+128 - Display resize (replaces ServerInit; U16 width, U16 height, PIXEL_FORMAT)
+131 - Print string message (3 x U8 padding, U32 length, n bytes string data)
+132 - Set a key/value pair in the client (U8 padding, U16 keylength, U16 value length, n bytes key, n bytes value)
+148 - "Ping" (3 x U8 padding, U32 unused value; followed by reply consisting of bytes: [0x95, 0, 0, 0, 0, 0, 0, 0])
+150 - Bandwidth measurement (replies with [0x97, 1], recieves U8, recieves n bytes, replies with [0x97, 2])
+161 - Change mode (U8) - known submessages:
+    0 - RDP
+    1 - End RDP, back to RFB
+    2 - RDP not availbale
+    3 - Host Direct
+    4 - End Host Direct, back to RFB
+    5 - Host Direct not available
+
+Client to server messages:
+4 - Keyboard input, sends U8 keyboard scancodes, but with press/release bit reversed and 1 subtracted!
+5 - As per VNC/RFB spec, except with additional U16 representing mouse wheel position
+    - Note that the server ignores button presses if there is movement, these must be sent as seperate messages
+93 - As per 5, but only mouse wheel position is sent (x and y are 0)
